@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JEE Prep Dashboard</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set Firebase Log Level
+        setLogLevel('debug');
+
+        // --- GLOBAL VARIABLES & FIREBASE INITIALIZATION ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = 'loading'; // Will be updated after auth
+        let isAuthReady = false;
+
+        // Ensure initialization only runs once
+        if (firebaseConfig) {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            // 1. Handle Authentication
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    isAuthReady = true;
+                    console.log("Firebase Auth Ready. User ID:", userId);
+                    document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                    
+                    // Start listening to data once authenticated
+                    setupFirestoreListeners();
+
+                } else if (!isAuthReady) {
+                    // Attempt sign in if not already done
+                    (async () => {
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                const anonymousUser = await signInAnonymously(auth);
+                                userId = anonymousUser.user.uid;
+                                console.log("Signed in anonymously. User ID:", userId);
+                            }
+                        } catch (error) {
+                            console.error("Authentication failed:", error);
+                        }
+                    })();
+                }
+            });
+
+            // If the token is available immediately, use it for first sign-in attempt
+            if (initialAuthToken && !auth.currentUser) {
+                // The onAuthStateChanged will handle the final state update
+                // This block is for immediate sign-in attempt upon load
+            }
+        } else {
+            console.error("Firebase configuration is missing.");
+            document.getElementById('user-id-display').textContent = 'Firebase Config Error';
+        }
+
+        // --- FIREBASE PATHS & HELPERS ---
+
+        /**
+         * Returns the path for a user's collection (private data).
+         * @param {string} collectionName - e.g., 'jee_todos' or 'jee_progress'
+         * @returns {string} The full collection path.
+         */
+        const getUserCollectionPath = (collectionName) => {
+            if (!userId || userId === 'loading') {
+                console.error("Attempted Firestore operation before Auth ready.");
+                return null;
+            }
+            return `artifacts/${appId}/users/${userId}/${collectionName}`;
+        };
+
+        // --- CORE APPLICATION LOGIC (Progress Tracking and ToDo List) ---
+
+        const chapterStructure = {
+            Physics: [
+                { name: "Mechanics", total: 10, completed: 0 },
+                { name: "Thermodynamics", total: 8, completed: 0 },
+                { name: "Electromagnetism", total: 12, completed: 0 }
+            ],
+            Chemistry: [
+                { name: "Physical Chemistry", total: 10, completed: 0 },
+                { name: "Organic Chemistry", total: 15, completed: 0 },
+                { name: "Inorganic Chemistry", total: 7, completed: 0 }
+            ],
+            Math: [
+                { name: "Algebra", total: 14, completed: 0 },
+                { name: "Calculus", total: 16, completed: 0 },
+                { name: "Coordinate Geometry", total: 8, completed: 0 }
+            ]
+        };
+        
+        let currentProgress = JSON.parse(JSON.stringify(chapterStructure));
+        
+        /**
+         * Calculates overall and subject-wise progress.
+         * @returns {{overall: number, subjects: object}} Progress percentages.
+         */
+        const calculateProgress = (structure) => {
+            let totalChapters = 0;
+            let completedChapters = 0;
+            const subjects = {};
+
+            for (const subject in structure) {
+                let subjectTotal = 0;
+                let subjectCompleted = 0;
+
+                structure[subject].forEach(chapterGroup => {
+                    subjectTotal += chapterGroup.total;
+                    subjectCompleted += chapterGroup.completed;
+                });
+
+                totalChapters += subjectTotal;
+                completedChapters += subjectCompleted;
+                subjects[subject] = subjectTotal > 0 ? (subjectCompleted / subjectTotal) * 100 : 0;
+            }
+
+            const overall = totalChapters > 0 ? (completedChapters / totalChapters) * 100 : 0;
+            return { overall, subjects, structure };
+        };
+
+        const renderProgress = (progressData) => {
+            const { overall, subjects, structure } = progressData;
+            
+            // 1. Overall Progress
+            const overallEl = document.getElementById('overall-progress-circle');
+            const overallTextEl = document.getElementById('overall-progress-text');
+            const percent = Math.round(overall);
+            overallEl.style.backgroundImage = `conic-gradient(#10b981 ${percent}%, #e5e7eb ${percent}%)`;
+            overallTextEl.textContent = `${percent}%`;
+
+            // 2. Subject Progress
+            const subjectContainer = document.getElementById('subject-progress-container');
+            subjectContainer.innerHTML = ''; // Clear previous
+
+            for (const [subject, percent] of Object.entries(subjects)) {
+                const roundedPercent = Math.round(percent);
+                subjectContainer.innerHTML += `
+                    <div class="flex flex-col items-center p-3 bg-white rounded-xl shadow-md transition hover:shadow-lg">
+                        <h4 class="font-semibold text-gray-700 mb-2">${subject}</h4>
+                        <div class="relative w-24 h-24">
+                            <div class="w-full h-full rounded-full bg-gray-200" style="background-image: conic-gradient(#3b82f6 ${roundedPercent}%, #e5e7eb ${roundedPercent}%)"></div>
+                            <span class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-xl font-bold text-blue-600">${roundedPercent}%</span>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // 3. Chapter Details
+            const chapterDetailsEl = document.getElementById('chapter-details');
+            chapterDetailsEl.innerHTML = ''; // Clear previous
+
+            for (const subject in structure) {
+                chapterDetailsEl.innerHTML += `
+                    <div class="mb-4 p-4 border border-gray-200 rounded-lg bg-gray-50">
+                        <h3 class="text-lg font-bold text-gray-800 mb-3">${subject}</h3>
+                        ${structure[subject].map((group, index) => {
+                            const currentSubject = structure[subject];
+                            const currentGroup = currentSubject[index];
+                            const groupPercent = currentGroup.total > 0 ? Math.round((currentGroup.completed / currentGroup.total) * 100) : 0;
+
+                            return `
+                                <div class="mb-3">
+                                    <div class="flex justify-between items-center mb-1">
+                                        <span class="text-sm font-medium text-gray-700">${group.name} (${group.completed}/${group.total})</span>
+                                        <div class="flex items-center">
+                                            <button onclick="decrementChapter('${subject}', ${index})" class="bg-red-100 text-red-600 hover:bg-red-200 p-1 rounded-full text-xs font-bold w-6 h-6 disabled:opacity-50" ${currentGroup.completed <= 0 ? 'disabled' : ''}>-</button>
+                                            <span class="mx-2 text-sm font-bold text-gray-800 w-8 text-center">${currentGroup.completed}</span>
+                                            <button onclick="incrementChapter('${subject}', ${index})" class="bg-green-100 text-green-600 hover:bg-green-200 p-1 rounded-full text-xs font-bold w-6 h-6 disabled:opacity-50" ${currentGroup.completed >= currentGroup.total ? 'disabled' : ''}>+</button>
+                                        </div>
+                                    </div>
+                                    <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                        <div class="bg-green-500 h-2.5 rounded-full transition-all duration-500" style="width: ${groupPercent}%"></div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+            }
+        };
+
+        window.incrementChapter = async (subject, groupIndex) => {
+            if (!isAuthReady) return showMessage('Authentication not ready.');
+            
+            const group = currentProgress[subject][groupIndex];
+            if (group.completed < group.total) {
+                group.completed++;
+                await saveProgress(currentProgress);
+            }
+        };
+
+        window.decrementChapter = async (subject, groupIndex) => {
+            if (!isAuthReady) return showMessage('Authentication not ready.');
+
+            const group = currentProgress[subject][groupIndex];
+            if (group.completed > 0) {
+                group.completed--;
+                await saveProgress(currentProgress);
+            }
+        };
+
+        const saveProgress = async (progress) => {
+            if (!isAuthReady) return;
+            try {
+                const progressRef = doc(db, getUserCollectionPath('jee_progress'), 'user_progress');
+                // Firestore has limitations on deeply nested arrays, so serialize the structure
+                await setDoc(progressRef, { 
+                    progressData: JSON.stringify(progress), 
+                    lastUpdated: serverTimestamp() 
+                }, { merge: true });
+                // Note: The onSnapshot listener handles the UI update
+            } catch (error) {
+                console.error("Error saving progress:", error);
+                showMessage("Could not save progress. See console.");
+            }
+        };
+
+        const setupProgressListener = () => {
+            if (!isAuthReady) return;
+
+            const progressRef = doc(db, getUserCollectionPath('jee_progress'), 'user_progress');
+            onSnapshot(progressRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().progressData) {
+                    try {
+                        // Deserialize the data
+                        const savedStructure = JSON.parse(docSnap.data().progressData);
+                        currentProgress = savedStructure;
+                        console.log("Progress loaded successfully:", currentProgress);
+                    } catch (e) {
+                        console.error("Error parsing saved progress data, resetting to default.", e);
+                        currentProgress = JSON.parse(JSON.stringify(chapterStructure));
+                    }
+                } else {
+                    console.log("No progress found, using default structure.");
+                    currentProgress = JSON.parse(JSON.stringify(chapterStructure));
+                }
+
+                // Recalculate and render the UI
+                const progressData = calculateProgress(currentProgress);
+                renderProgress(progressData);
+            }, (error) => {
+                console.error("Error listening to progress:", error);
+                showMessage("Error loading progress data.");
+            });
+        };
+        
+        // --- TO-DO LIST LOGIC ---
+
+        const todoList = document.getElementById('todo-list');
+        const todoInput = document.getElementById('todo-input');
+
+        const setupToDoListener = () => {
+            if (!isAuthReady) return;
+
+            const todosColRef = collection(db, getUserCollectionPath('jee_todos'));
+            // Query for up to 50 tasks, ordered by creation time
+            const q = query(todosColRef);
+
+            onSnapshot(q, (snapshot) => {
+                const todos = [];
+                snapshot.forEach(doc => {
+                    todos.push({ id: doc.id, ...doc.data() });
+                });
+                renderTodos(todos.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)));
+            }, (error) => {
+                console.error("Error listening to todos:", error);
+                showMessage("Error loading to-do list.");
+            });
+        };
+        
+        const renderTodos = (todos) => {
+            todoList.innerHTML = '';
+            if (todos.length === 0) {
+                todoList.innerHTML = '<p class="text-gray-500 text-center py-4">No tasks yet! Add your first task.</p>';
+                return;
+            }
+
+            todos.forEach(todo => {
+                const listItem = document.createElement('li');
+                listItem.className = `flex items-center justify-between p-3 rounded-lg border border-gray-100 shadow-sm mb-2 transition ${todo.completed ? 'bg-green-50' : 'bg-white'}`;
+                
+                listItem.innerHTML = `
+                    <div class="flex items-center flex-grow min-w-0">
+                        <input type="checkbox" id="todo-${todo.id}" ${todo.completed ? 'checked' : ''} 
+                               onclick="toggleTodo('${todo.id}', ${!todo.completed})"
+                               class="w-5 h-5 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500 cursor-pointer">
+                        <label for="todo-${todo.id}" class="ml-3 text-sm font-medium text-gray-900 truncate ${todo.completed ? 'line-through text-gray-500' : ''}">
+                            ${todo.text}
+                        </label>
+                    </div>
+                    <button onclick="deleteTodo('${todo.id}')"
+                            class="p-1 text-red-500 hover:text-red-700 hover:bg-red-100 rounded-full transition ml-2 flex-shrink-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 6h6v10H7V6z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                `;
+                todoList.appendChild(listItem);
+            });
+        };
+
+        window.addTodo = async () => {
+            if (!isAuthReady) return showMessage('Authentication not ready.');
+
+            const text = todoInput.value.trim();
+            if (text === '') return;
+
+            try {
+                await addDoc(collection(db, getUserCollectionPath('jee_todos')), {
+                    text: text,
+                    completed: false,
+                    createdAt: serverTimestamp()
+                });
+                todoInput.value = '';
+            } catch (error) {
+                console.error("Error adding todo:", error);
+                showMessage("Could not add task. See console.");
+            }
+        };
+
+        window.toggleTodo = async (id, completed) => {
+            if (!isAuthReady) return showMessage('Authentication not ready.');
+
+            try {
+                const todoRef = doc(db, getUserCollectionPath('jee_todos'), id);
+                await updateDoc(todoRef, { completed: completed });
+            } catch (error) {
+                console.error("Error toggling todo:", error);
+                showMessage("Could not update task. See console.");
+            }
+        };
+
+        window.deleteTodo = async (id) => {
+            if (!isAuthReady) return showMessage('Authentication not ready.');
+
+            try {
+                await deleteDoc(doc(db, getUserCollectionPath('jee_todos'), id));
+            } catch (error) {
+                console.error("Error deleting todo:", error);
+                showMessage("Could not delete task. See console.");
+            }
+        };
+        
+        /**
+         * Setup all Firestore real-time listeners.
+         */
+        const setupFirestoreListeners = () => {
+            setupProgressListener();
+            setupToDoListener();
+        };
+
+        // --- GENERAL UI/HELPER FUNCTIONS ---
+        
+        const showMessage = (message, isError = true) => {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = message;
+            messageBox.className = `p-3 mb-4 rounded-lg text-center font-medium ${isError ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'} transition-opacity duration-300`;
+            messageBox.style.opacity = '1';
+            setTimeout(() => {
+                messageBox.style.opacity = '0';
+            }, 5000);
+        };
+
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+
+        /* Custom Styles for the Countdown Circle */
+        .countdown-circle {
+            background-image: conic-gradient(#3b82f6 100%, #e5e7eb 0%);
+        }
+
+        .countdown-segment {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+
+        .timer-button {
+            transition: all 0.2s;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+
+<body class="p-4 sm:p-8">
+    <div id="message-box" class="fixed top-4 right-4 z-50 opacity-0 transition-opacity duration-300"></div>
+
+    <!-- Header & Title -->
+    <header class="text-center mb-8">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-indigo-700">JEE Prep Dashboard</h1>
+        <p id="user-id-display" class="text-sm text-gray-500 mt-1"></p>
+    </header>
+
+    <main class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- COLUMN 1: TIME MANAGEMENT -->
+        <section class="lg:col-span-1 space-y-6">
+
+            <!-- Card 1: Days Remaining Till Exam -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl countdown-segment">
+                <h2 class="text-xl font-bold mb-4 text-gray-800">Days Remaining (Target: April 15, 2026)</h2>
+                <div id="countdown" class="flex justify-around items-center text-center">
+                    <!-- Dynamic content filled by JS -->
+                </div>
+            </div>
+
+            <!-- Card 2: Study Timer (Pomodoro Style) -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl countdown-segment">
+                <h2 class="text-xl font-bold mb-4 text-gray-800">Study Timer</h2>
+                <div class="text-center">
+                    <p id="timer-status" class="text-lg font-medium text-indigo-600 mb-2">Ready to Start</p>
+                    <div id="timer-display" class="text-6xl font-extrabold text-gray-900 mb-6">25:00</div>
+                    
+                    <div class="flex justify-center space-x-4">
+                        <button id="timer-start-pause" onclick="toggleTimer()" 
+                                class="timer-button bg-green-500 text-white p-3 rounded-xl font-semibold hover:bg-green-600 active:scale-95">
+                            Start
+                        </button>
+                        <button id="timer-reset" onclick="resetTimer()" 
+                                class="timer-button bg-red-500 text-white p-3 rounded-xl font-semibold hover:bg-red-600 active:scale-95">
+                            Reset
+                        </button>
+                        <select id="timer-mode" onchange="setTimerMode(this.value)" class="bg-gray-100 p-3 rounded-xl border border-gray-300">
+                            <option value="25" selected>25 min Study</option>
+                            <option value="5">5 min Break</option>
+                            <option value="45">45 min Study</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Card 3: To Do List -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl countdown-segment">
+                <h2 class="text-xl font-bold mb-4 text-gray-800">Daily To-Do List</h2>
+                <div class="flex mb-4">
+                    <input type="text" id="todo-input" placeholder="Add a new task..." 
+                           class="flex-grow p-3 border border-gray-300 rounded-l-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm">
+                    <button onclick="addTodo()" 
+                            class="bg-indigo-600 text-white p-3 rounded-r-lg font-semibold hover:bg-indigo-700 active:scale-95 transition">
+                        Add
+                    </button>
+                </div>
+                <ul id="todo-list" class="space-y-2 max-h-96 overflow-y-auto">
+                    <!-- To-Do items loaded from Firestore -->
+                    <p class="text-gray-500 text-center py-4">Loading tasks...</p>
+                </ul>
+            </div>
+        </section>
+
+        <!-- COLUMN 2: PROGRESS & PERFORMANCE -->
+        <section class="lg:col-span-2 space-y-6">
+            
+            <!-- Card 4: Overall Progress and Performance Graphs -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl countdown-segment">
+                <h2 class="text-xl font-bold mb-4 text-gray-800">Overall Progress & Performance</h2>
+                
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
+                    <!-- Overall Progress Circle -->
+                    <div class="flex flex-col items-center p-3">
+                        <h4 class="font-semibold text-gray-700 mb-3">Overall Progress</h4>
+                        <div id="overall-progress-circle" class="relative w-36 h-36 rounded-full bg-gray-200 transition-all duration-500" style="background-image: conic-gradient(#10b981 0%, #e5e7eb 0%);">
+                            <span id="overall-progress-text" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-2xl font-bold text-green-600">0%</span>
+                        </div>
+                    </div>
+
+                    <!-- Subject Progress Cards (Graphs) -->
+                    <div id="subject-progress-container" class="md:col-span-3 grid grid-cols-2 sm:grid-cols-3 gap-4">
+                        <!-- Subject progress data loaded here -->
+                        <div class="flex flex-col items-center p-3 bg-white rounded-xl shadow-md transition hover:shadow-lg">
+                            <h4 class="font-semibold text-gray-700 mb-2">Loading...</h4>
+                            <div class="relative w-24 h-24">
+                                <div class="w-full h-full rounded-full bg-gray-200"></div>
+                                <span class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-xl font-bold text-blue-600">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-6">
+                    <h3 class="text-lg font-bold text-gray-800 mb-3">Mock Test Scores (Sample Data)</h3>
+                    <div class="w-full h-40 bg-gray-50 p-3 rounded-lg flex items-end justify-around">
+                        <!-- Sample Bar Chart -->
+                        <div class="flex flex-col items-center group cursor-pointer">
+                            <div class="w-8 bg-blue-400 rounded-t-lg transition-all duration-500 hover:bg-blue-600" style="height: 60px;"></div>
+                            <span class="text-xs text-gray-600 mt-1">Mock 1</span>
+                        </div>
+                        <div class="flex flex-col items-center group cursor-pointer">
+                            <div class="w-8 bg-blue-400 rounded-t-lg transition-all duration-500 hover:bg-blue-600" style="height: 90px;"></div>
+                            <span class="text-xs text-gray-600 mt-1">Mock 2</span>
+                        </div>
+                        <div class="flex flex-col items-center group cursor-pointer">
+                            <div class="w-8 bg-blue-400 rounded-t-lg transition-all duration-500 hover:bg-blue-600" style="height: 75px;"></div>
+                            <span class="text-xs text-gray-600 mt-1">Mock 3</span>
+                        </div>
+                        <div class="flex flex-col items-center group cursor-pointer">
+                            <div class="w-8 bg-blue-400 rounded-t-lg transition-all duration-500 hover:bg-blue-600" style="height: 110px;"></div>
+                            <span class="text-xs text-gray-600 mt-1">Mock 4</span>
+                        </div>
+                        <div class="flex flex-col items-center group cursor-pointer">
+                            <div class="w-8 bg-blue-400 rounded-t-lg transition-all duration-500 hover:bg-blue-600" style="height: 140px;"></div>
+                            <span class="text-xs text-gray-600 mt-1">Mock 5</span>
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-500 mt-2 italic">*Mock test scores are sample data only.</p>
+                </div>
+            </div>
+
+            <!-- Card 5: Chapter-wise Progress Tracker -->
+            <div class="bg-white p-6 rounded-2xl shadow-xl countdown-segment">
+                <h2 class="text-xl font-bold mb-4 text-gray-800">Chapter-wise Progress Tracker</h2>
+                <p class="text-sm text-gray-600 mb-4">Track the number of chapters/modules you've completed within each major topic. Click '+' or '-' to update your progress.</p>
+                <div id="chapter-details" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <!-- Progress details loaded from Firestore -->
+                    <div class="p-4 border border-gray-200 rounded-lg bg-gray-50">
+                        <h3 class="text-lg font-bold text-gray-800 mb-3">Loading subjects...</h3>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+    </main>
+
+    <!-- Timer and Countdown JavaScript -->
+    <script>
+        // --- COUNTDOWN LOGIC ---
+        const targetDate = new Date("2026-04-15T09:00:00").getTime();
+        
+        const updateCountdown = () => {
+            const now = new Date().getTime();
+            const distance = targetDate - now;
+
+            const days = Math.floor(distance / (1000 * 60 * 60 * 24));
+            const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+            const countdownEl = document.getElementById('countdown');
+            if (distance < 0) {
+                countdownEl.innerHTML = '<p class="text-xl font-bold text-red-600">The JEE exam has started/passed!</p>';
+                return;
+            }
+
+            countdownEl.innerHTML = `
+                <div class="p-2">
+                    <div class="text-4xl sm:text-5xl font-extrabold text-blue-600">${days}</div>
+                    <div class="text-sm text-gray-500">Days</div>
+                </div>
+                <div class="p-2">
+                    <div class="text-4xl sm:text-5xl font-extrabold text-blue-600">${hours}</div>
+                    <div class="text-sm text-gray-500">Hours</div>
+                </div>
+                <div class="p-2">
+                    <div class="text-4xl sm:text-5xl font-extrabold text-blue-600">${minutes}</div>
+                    <div class="text-sm text-gray-500">Mins</div>
+                </div>
+                <div class="p-2 hidden sm:block">
+                    <div class="text-4xl sm:text-5xl font-extrabold text-blue-600">${seconds}</div>
+                    <div class="text-sm text-gray-500">Secs</div>
+                </div>
+            `;
+        };
+
+        // --- STUDY TIMER LOGIC ---
+        let timer;
+        let isRunning = false;
+        let timeInSeconds = 25 * 60; // Default 25 minutes
+        let defaultTime = 25 * 60;
+
+        const timerDisplayEl = document.getElementById('timer-display');
+        const timerStatusEl = document.getElementById('timer-status');
+        const timerButtonEl = document.getElementById('timer-start-pause');
+        const timerModeEl = document.getElementById('timer-mode');
+
+        const updateTimerDisplay = () => {
+            const minutes = String(Math.floor(timeInSeconds / 60)).padStart(2, '0');
+            const seconds = String(timeInSeconds % 60).padStart(2, '0');
+            timerDisplayEl.textContent = `${minutes}:${seconds}`;
+        };
+
+        const timerTick = () => {
+            if (timeInSeconds <= 0) {
+                clearInterval(timer);
+                isRunning = false;
+                timerButtonEl.textContent = 'Start';
+                timerButtonEl.classList.replace('bg-yellow-500', 'bg-green-500');
+                timerStatusEl.textContent = 'Time Up! Take a break.';
+                // Optional: Notify user (using message box instead of alert)
+                showMessage('Timer finished! Good work.', false);
+                return;
+            }
+            timeInSeconds--;
+            updateTimerDisplay();
+        };
+
+        window.toggleTimer = () => {
+            if (isRunning) {
+                // Pause
+                clearInterval(timer);
+                isRunning = false;
+                timerButtonEl.textContent = 'Resume';
+                timerButtonEl.classList.replace('bg-yellow-500', 'bg-green-500');
+                timerStatusEl.textContent = 'Paused';
+            } else {
+                // Start/Resume
+                isRunning = true;
+                timer = setInterval(timerTick, 1000);
+                timerButtonEl.textContent = 'Pause';
+                timerButtonEl.classList.replace('bg-green-500', 'bg-yellow-500');
+                timerStatusEl.textContent = 'In Progress';
+            }
+        };
+
+        window.resetTimer = () => {
+            clearInterval(timer);
+            isRunning = false;
+            timeInSeconds = defaultTime;
+            updateTimerDisplay();
+            timerButtonEl.textContent = 'Start';
+            timerButtonEl.classList.replace('bg-yellow-500', 'bg-green-500');
+            timerStatusEl.textContent = 'Ready to Start';
+        };
+
+        window.setTimerMode = (minutes) => {
+            defaultTime = minutes * 60;
+            resetTimer(); // Reset timer to new mode
+        };
+
+        // --- INITIALIZATION ---
+        window.onload = function() {
+            // Start the countdown immediately
+            updateCountdown();
+            setInterval(updateCountdown, 1000);
+            
+            // Set initial timer display
+            updateTimerDisplay();
+
+            // Set up event listener for 'Enter' key in todo input
+            todoInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    window.addTodo();
+                }
+            });
+        };
+    </script>
+</body>
+</html>
+
